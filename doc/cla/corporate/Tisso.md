@@ -1,4 +1,4 @@
-Germany, 2020-02-12
+Germany, 2020-02-13
 
 Tisso GmbH agrees to the terms of the Odoo Corporate Contributor License
 Agreement v1.0.
