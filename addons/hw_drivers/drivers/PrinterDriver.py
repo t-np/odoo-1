@@ -12,13 +12,17 @@ import base64
 import re
 import subprocess
 import tempfile
-from uuid import getnode as get_mac
 from PIL import Image, ImageOps
 
 from odoo import http, _
 from odoo.addons.hw_drivers.controllers.driver import event_manager, Driver, PPDs, conn, printers, cups_lock, iot_devices
 from odoo.addons.hw_drivers.tools import helpers
 from odoo.addons.hw_proxy.controllers.main import drivers as old_drivers
+
+try:
+    from odoo.addons.hw_drivers.controllers.driver import cm
+except:
+    cm = None
 
 _logger = logging.getLogger(__name__)
 
@@ -92,7 +96,7 @@ class PrinterDriver(Driver):
 
     @classmethod
     def supported(cls, device):
-        protocol = ['dnssd', 'lpd']
+        protocol = ['dnssd', 'lpd', 'socket']
         if any(x in device['url'] for x in protocol) and device['device-make-and-model'] != 'Unknown' or 'direct' in device['device-class']:
             model = cls.get_device_model(device)
             ppdFile = ''
@@ -208,11 +212,23 @@ class PrinterDriver(Driver):
                 - 2: 90dpi x 180 dpi
                 - 3: 90dpi x 90 dpi
             - x: Length in X direction, in bytes, represented as 2 bytes in little endian
+                --> Must be <= 255
             - y: Length in Y direction, in dots, represented as 2 bytes in little endian
         '''
         width_pixels, height_pixels = im.size
         width_bytes = int((width_pixels + 7) / 8)
         print_command = b"\x1d\x76\x30" + b'\x00' + (width_bytes).to_bytes(2, 'little') + height_pixels.to_bytes(2, 'little')
+
+        # There is a height limit when printing images, so we split the image
+        # into slices and print each slice with a separate command.
+        blobs = []
+        slice_offset = 0
+        while slice_offset < height_pixels:
+            slice_height_pixels = min(255, height_pixels - slice_offset)
+            im_slice = im.crop((0, slice_offset, width_pixels, slice_offset + slice_height_pixels))
+            print_command = b"\x1d\x76\x30" + b'\x00' + (width_bytes).to_bytes(2, 'little') + slice_height_pixels.to_bytes(2, 'little')
+            blobs += [print_command + im_slice.tobytes()]
+            slice_offset += slice_height_pixels
 
         '''GS V m
             - GS V: Cut, in hex: "1D 56"
@@ -224,7 +240,7 @@ class PrinterDriver(Driver):
         '''
         cut = b'\x1d\x56' + b'\x41'
 
-        self.print_raw(center + print_command + im.tobytes() + cut + b'\n')
+        self.print_raw(center + b"".join(blobs) + cut + b'\n')
 
     def print_status(self):
         """Prints the status ticket of the IoTBox on the current printer."""
@@ -232,16 +248,10 @@ class PrinterDriver(Driver):
         ip = ''
         mac = ''
         homepage = ''
+        pairing_code = ''
 
-        hosting_ap = os.system('pgrep hostapd') == 0
         ssid = helpers.get_ssid()
-        if hosting_ap:
-            with open('/root_bypass_ramdisks/etc/hostapd/hostapd.conf') as config_file:
-                lines = config_file.readlines()
-            ssid = lines[1].split("=")[1].replace("\n", "")
-            wlan = '\nWireless network:\n%s\n\n' % ssid
-        elif ssid:
-            wlan = '\nWireless network:\n%s\n\n' % ssid
+        wlan = '\nWireless network:\n%s\n\n' % ssid
 
         interfaces = ni.interfaces()
         ips = []
@@ -258,21 +268,21 @@ class PrinterDriver(Driver):
         else:
             ip = '\nIP Addresses:\n%s\n' % '\n'.join(ips)
 
-        mac_addr = get_mac()
-        h = iter(hex(mac_addr)[2:].zfill(12))
-        mac_addr = ":".join(i + next(h) for i in h)
-
         if len(ips) >= 1:
             ips_filtered = [i for i in ips if i != '127.0.0.1']
             main_ips = ips_filtered and ips_filtered[0] or '127.0.0.1'
-            mac = '\nMAC Address:\n%s\n' % mac_addr
+            mac = '\nMAC Address:\n%s\n' % helpers.get_mac_address()
             homepage = '\nHomepage:\nhttp://%s:8069\n\n' % main_ips
+
+        code = cm and cm.pairing_code
+        if code:
+            pairing_code = '\nPairing Code:\n%s\n' % code
 
         center = b'\x1b\x61\x01'
         title = b'\n\x1b\x21\x30\x1b\x4d\x01IoTBox Status\x1b\x4d\x00\x1b\x21\x00\n'
         cut = b'\x1d\x56\x41'
 
-        self.print_raw(center + title + wlan.encode() + mac.encode() + ip.encode() + homepage.encode() + cut + b'\n')
+        self.print_raw(center + title + wlan.encode() + mac.encode() + ip.encode() + homepage.encode() + pairing_code.encode() + cut + b'\n')
 
     def open_cashbox(self):
         """Sends a signal to the current printer to open the connected cashbox."""

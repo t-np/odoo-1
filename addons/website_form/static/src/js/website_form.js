@@ -64,6 +64,7 @@ odoo.define('website_form.animation', function (require) {
                         var $field = self.$target.find('input[name="' + field + '"], textarea[name="' + field + '"]');
                         if (!$field.val()) {
                             $field.val(values[field]);
+                            $field.data('website_form_original_default_value', $field.val());
                         }
                     }
                 });
@@ -121,6 +122,20 @@ odoo.define('website_form.animation', function (require) {
                     }
                 }
             });
+
+            // force server format if usage of textual month that would not be understood server-side
+            if (time.getLangDatetimeFormat().indexOf('MMM') !== 1) {
+                this.$target.find('.form-field:not(.o_website_form_custom)')
+                .find('.o_website_form_date, .o_website_form_datetime').each(function () {
+                    var date = $(this).datetimepicker('viewDate').clone().locale('en');
+                    var format = 'YYYY-MM-DD';
+                    if ($(this).hasClass('o_website_form_datetime')) {
+                        date = date.utc();
+                        format = 'YYYY-MM-DD HH:mm:ss';
+                    }
+                    form_values[$(this).find('input').attr('name')] = date.format(format);
+                });
+            }
 
             // Post form and handle result
             ajax.post(this.$target.attr('action') + (this.$target.data('force_action')||this.$target.data('model_name')), form_values)
@@ -197,7 +212,7 @@ odoo.define('website_form.animation', function (require) {
                     if (_.isString(error_fields[field_name])){
                         $field.popover({content: error_fields[field_name], trigger: 'hover', container: 'body', placement: 'top'});
                         // update error message and show it.
-                        $field.data("bs.popover").options.content = error_fields[field_name];
+                        $field.data("bs.popover").config.content = error_fields[field_name];
                         $field.popover('show');
                     }
                     form_valid = false;

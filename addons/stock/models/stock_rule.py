@@ -8,7 +8,7 @@ from psycopg2 import OperationalError
 
 from odoo import api, fields, models, registry, SUPERUSER_ID, _
 from odoo.osv import expression
-from odoo.tools import DEFAULT_SERVER_DATETIME_FORMAT, float_compare, float_round
+from odoo.tools import DEFAULT_SERVER_DATETIME_FORMAT, float_compare, float_is_zero, float_round
 
 from odoo.exceptions import UserError
 
@@ -187,6 +187,8 @@ class StockRule(models.Model):
             'picking_id': False,
             'picking_type_id': self.picking_type_id.id,
             'propagate_cancel': self.propagate_cancel,
+            'propagate_date': self.propagate_date,
+            'propagate_date_minimum_delta': self.propagate_date_minimum_delta,
             'warehouse_id': self.warehouse_id.id,
             'delay_alert': self.delay_alert
         }
@@ -213,7 +215,7 @@ class StockRule(models.Model):
         forecasted_qties_by_loc = {}
         for location, product_ids in mtso_products_by_locations.items():
             products = self.env['product.product'].browse(product_ids).with_context(location=location.id)
-            forecasted_qties_by_loc[location] = {product.id: product.virtual_available for product in products}
+            forecasted_qties_by_loc[location] = {product.id: product.free_qty for product in products}
 
         # Prepare the move values, adapt the `procure_method` if needed.
         for procurement, rule in procurements:
@@ -260,6 +262,11 @@ class StockRule(models.Model):
         date_expected = fields.Datetime.to_string(
             fields.Datetime.from_string(values['date_planned']) - relativedelta(days=self.delay or 0)
         )
+
+        partner = self.partner_address_id or (values.get('group_id', False) and values['group_id'].partner_id)
+        if partner:
+            product_id = product_id.with_context(lang=partner.lang or self.env.user.lang)
+
         # it is possible that we've already got some move done, so check for the done qty and create
         # a new move with the correct qty
         qty_left = product_qty
@@ -269,7 +276,7 @@ class StockRule(models.Model):
             'product_id': product_id.id,
             'product_uom': product_uom.id,
             'product_uom_qty': qty_left,
-            'partner_id': self.partner_address_id.id or (values.get('group_id', False) and values['group_id'].partner_id.id) or False,
+            'partner_id': partner.id if partner else False,
             'location_id': self.location_src_id.id,
             'location_dest_id': location_id.id,
             'move_dest_ids': values.get('move_dest_ids', False) and [(4, x.id) for x in values['move_dest_ids']] or [],
@@ -364,6 +371,11 @@ class ProcurementGroup(models.Model):
             procurement.values.setdefault('company_id', self.env.company)
             procurement.values.setdefault('priority', '1')
             procurement.values.setdefault('date_planned', fields.Datetime.now())
+            if (
+                procurement.product_id.type not in ('consu', 'product') or
+                float_is_zero(procurement.product_qty, precision_rounding=procurement.product_uom.rounding)
+            ):
+                continue
             rule = self._get_rule(procurement.product_id, procurement.location_id, procurement.values)
             if not rule:
                 errors.append(_('No rule has been found to replenish "%s" in "%s".\nVerify the routes configuration on the product.') %
@@ -554,17 +566,17 @@ class ProcurementGroup(models.Model):
                 location_data[key]['orderpoints'] += orderpoint
                 location_data[key]['groups'] = self._procurement_from_orderpoint_get_groups([orderpoint.id])
 
-            for location_id, location_data in location_data.items():
-                location_orderpoints = location_data['orderpoints']
+            for location_id, location_res in location_data.items():
+                location_orderpoints = location_res['orderpoints']
                 product_context = dict(self._context, location=location_orderpoints[0].location_id.id)
                 substract_quantity = location_orderpoints._quantity_in_progress()
 
-                for group in location_data['groups']:
+                for group in location_res['groups']:
                     if group.get('from_date'):
                         product_context['from_date'] = group['from_date'].strftime(DEFAULT_SERVER_DATETIME_FORMAT)
                     if group['to_date']:
                         product_context['to_date'] = group['to_date'].strftime(DEFAULT_SERVER_DATETIME_FORMAT)
-                    product_quantity = location_data['products'].with_context(product_context)._product_available()
+                    product_quantity = location_res['products'].with_context(product_context)._product_available()
                     for orderpoint in location_orderpoints:
                         try:
                             op_product_virtual = product_quantity[orderpoint.product_id.id]['virtual_available']
@@ -577,7 +589,7 @@ class ProcurementGroup(models.Model):
                                 if float_compare(remainder, 0.0, precision_rounding=orderpoint.product_uom.rounding) > 0:
                                     qty += orderpoint.qty_multiple - remainder
 
-                                if float_compare(qty, 0.0, precision_rounding=orderpoint.product_uom.rounding) < 0:
+                                if float_compare(qty, 0.0, precision_rounding=orderpoint.product_uom.rounding) <= 0:
                                     continue
 
                                 qty -= substract_quantity[orderpoint.id]

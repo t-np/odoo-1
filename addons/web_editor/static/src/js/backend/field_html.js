@@ -107,16 +107,19 @@ var FieldHtml = basic_fields.DebouncedField.extend(TranslatableFieldMixin, {
             return this._super();
         }
         var _super = this._super.bind(this);
-        return this.wysiwyg.save().then(function (result) {
-            self._isDirty = result.isDirty;
-            _super();
+        return this.wysiwyg.saveCroppedImages(this.$content).then(function () {
+            return self.wysiwyg.save().then(function (result) {
+                self._isDirty = result.isDirty;
+                _super();
+            });
         });
     },
     /**
      * @override
      */
     isSet: function () {
-        return this.value && this.value !== "<p><br/></p>" && this.value.match(/\S/);
+        var value = this.value && this.value.split('&nbsp;').join('').replace(/\s/g, ''); // Removing spaces & html spaces
+        return value && value !== "<p></p>" && value !== "<p><br></p>" && value.match(/\S/);
     },
     /**
      * @override
@@ -186,6 +189,7 @@ var FieldHtml = basic_fields.DebouncedField.extend(TranslatableFieldMixin, {
      * @returns {Object}
      */
     _getWysiwygOptions: function () {
+        var self = this;
         return Object.assign({}, this.nodeOptions, {
             recordInfo: {
                 context: this.record.getContext(this.recordParams),
@@ -220,6 +224,9 @@ var FieldHtml = basic_fields.DebouncedField.extend(TranslatableFieldMixin, {
                         toolbar.splice(-1, 0, ['view', ['codeview']]);
                     }
                 }
+                if ("mailing.mailing" === self.model) {
+                    options.noVideos = true;
+                }
                 options.prettifyHtml = false;
                 return options;
             },
@@ -245,7 +252,7 @@ var FieldHtml = basic_fields.DebouncedField.extend(TranslatableFieldMixin, {
             dataPointID: this.dataPointID,
             changes: _.object([this.fieldNameAttachment], [{
                 operation: 'ADD_M2M',
-                ids: attachments
+                ids: attachments.data,
             }])
         });
     },
@@ -442,6 +449,19 @@ var FieldHtml = basic_fields.DebouncedField.extend(TranslatableFieldMixin, {
         $lis.not('[id]').each(function () {
             $(this).attr('id', 'checklist-id-' + (++max));
         });
+    },
+    /**
+     * Allows Enter keypress in a textarea (source mode)
+     *
+     * @private
+     * @param {OdooEvent} ev
+     */
+    _onKeydown: function (ev) {
+        if (ev.which === $.ui.keyCode.ENTER && $(ev.target).is('textarea')) {
+            ev.stopPropagation();
+            return;
+        }
+        this._super.apply(this, arguments);
     },
     /**
      * Method called when wysiwyg triggers a change.

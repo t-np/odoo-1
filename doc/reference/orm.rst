@@ -127,7 +127,11 @@ Basic Fields
 Advanced Fields
 ---------------
 
+.. autoclass:: Binary()
+
 .. autoclass:: Html()
+
+.. autoclass:: Image()
 
 .. autoclass:: Monetary()
 
@@ -140,22 +144,27 @@ Advanced Fields
 Date(time) Fields
 '''''''''''''''''
 
-Dates and Datetimes are very important fields in any kind of business
-application, they are heavily used in many popular Odoo applications such as
-logistics or accounting and their misuse can create invisible yet painful
-bugs, this excerpt aims to provide Odoo developers with the knowledge required
+:class:`Dates <odoo.fields.Date>` and :class:`Datetimes <odoo.fields.Datetime>`
+are very important fields in any kind of business application.
+Their misuse can create invisible yet painful bugs, this section
+aims to provide Odoo developers with the knowledge required
 to avoid misusing these fields.
 
 When assigning a value to a Date/Datetime field, the following options are valid:
 
 * A `date` or `datetime` object.
-* A string in the proper server format *(YYYY-MM-DD)* for Date fields,
-  *(YYYY-MM-DD HH:MM:SS)* for Datetime fields.
+* A string in the proper server format:
+
+  * ``YYYY-MM-DD`` for :class:`~odoo.fields.Date` fields,
+  * ``YYYY-MM-DD HH:MM:SS`` for :class:`~odoo.fields.Datetime` fields.
+
 * `False` or `None`.
 
 The Date and Datetime fields class have helper methods to attempt conversion
-into a compatible type: :func:`~odoo.fields.Date.to_date` will convert to a `datetime.date`
-object while :func:`~odoo.fields.Datetime.to_datetime` will convert to a `datetime.datetime`.
+into a compatible type:
+
+* :func:`~odoo.fields.Date.to_date` will convert to a :class:`datetime.date`
+* :func:`~odoo.fields.Datetime.to_datetime` will convert to a :class:`datetime.datetime`.
 
 .. admonition:: Example
 
@@ -313,6 +322,28 @@ fields. Related fields are automatically recomputed when their
 dependencies are modified.
 
 .. note:: The related fields are computed in sudo mode.
+
+.. warning::
+
+    You cannot chain :class:`~odoo.fields.Many2many` or :class:`~odoo.fields.One2many` fields in ``related`` fields dependencies.
+
+    ``related`` can be used to refer to a :class:`~odoo.fields.One2many` or
+    :class:`~odoo.fields.Many2many` field on another model on the
+    condition that it's done through a ``Many2one`` relation on the current model.
+    ``One2many`` and ``Many2many`` are not supported and the results will not be
+    aggregated correctly::
+
+      m2o_id = fields.Many2one()
+      m2m_ids = fields.Many2many()
+      o2m_ids = fields.One2many()
+
+      # Supported
+      d_ids = fields.Many2many(related="m2o_id.m2m_ids")
+      e_ids = fields.One2many(related="m2o_id.o2m_ids")
+
+      # Won't work: use a custom Many2many computed field instead
+      f_ids = fields.Many2many(related="m2m_ids.m2m_ids")
+      g_ids = fields.One2many(related="o2m_ids.o2m_ids")
 
 .. _reference/fields/automatic:
 
@@ -522,7 +553,7 @@ Method decorators
 =================
 
 .. automodule:: odoo.api
-    :members: depends, depends_context, constrains, onchange, returns, model_create_multi
+    :members: depends, depends_context, constrains, onchange, returns, model, model_create_multi
 
 .. .. currentmodule:: odoo.api
 
@@ -859,6 +890,16 @@ Map
 
 .. automethod:: Model.mapped
 
+.. note::
+
+    Since V13, multi-relational field access is supported and works like a mapped call:
+
+    .. code-block:: python3
+
+        records.partner_id  # == records.mapped('partner_id')
+        records.partner_id.bank_ids  # == records.mapped('partner_id.bank_ids')
+        records.partner_id.mapped('name')  # == records.mapped('partner_id.name')
+
 Sort
 ''''
 
@@ -932,8 +973,10 @@ will yield:
     :language: text
     :lines: 13
 
-.. note:: it will also yield the various :ref:`automatic fields
-          <reference/fields/automatic>` unless they've been disabled
+.. note::
+
+    It will also yield the various :ref:`automatic fields
+    <reference/fields/automatic>` unless they've been disabled
 
 Delegation
 ----------
@@ -971,6 +1014,12 @@ and it's possible to write directly on the delegated field:
 
 .. warning:: when using delegation inheritance, methods are *not* inherited,
              only fields
+
+.. warning::
+
+    * `_inherits` is more or less implemented, avoid it if you can;
+    * chained `_inherits` is essentially not implemented, we cannot guarantee anything on the final behavior.
+
 
 Fields Incremental Definition
 -----------------------------

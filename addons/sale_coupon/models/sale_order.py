@@ -25,9 +25,6 @@ class SaleOrder(models.Model):
     def _get_no_effect_on_threshold_lines(self):
         self.ensure_one()
         lines = self.env['sale.order.line']
-        # Do not count already applied promo_code discount; Do not substract itself
-        if self.code_promo_program_id and self.code_promo_program_id.reward_type == 'discount':
-            lines = self.order_line.filtered(lambda l: l.product_id == self.code_promo_program_id.discount_line_product_id)
         return lines
 
     def recompute_coupon_lines(self):
@@ -39,8 +36,10 @@ class SaleOrder(models.Model):
     @api.returns('self', lambda value: value.id)
     def copy(self, default=None):
         order = super(SaleOrder, self).copy(default)
-        order._get_reward_lines().unlink()
-        order._create_new_no_code_promo_reward_lines()
+        reward_line = order._get_reward_lines()
+        if reward_line:
+            reward_line.unlink()
+            order._create_new_no_code_promo_reward_lines()
         return order
 
     def action_confirm(self):
@@ -79,14 +78,19 @@ class SaleOrder(models.Model):
     def _get_reward_values_product(self, program):
         price_unit = self.order_line.filtered(lambda line: program.reward_product_id == line.product_id)[0].price_reduce
 
-        order_lines = (self.order_line - self._get_reward_lines()).filtered(lambda x: program._is_valid_product(x.product_id))
+        order_lines = (self.order_line - self._get_reward_lines()).filtered(lambda x: program._get_valid_products(x.product_id))
         max_product_qty = sum(order_lines.mapped('product_uom_qty')) or 1
         # Remove needed quantity from reward quantity if same reward and rule product
-        if program._is_valid_product(program.reward_product_id):
+        if program._get_valid_products(program.reward_product_id):
             # number of times the program should be applied
             program_in_order = max_product_qty // (program.rule_min_quantity + program.reward_product_quantity)
             # multipled by the reward qty
             reward_product_qty = program.reward_product_quantity * program_in_order
+            # do not give more free reward than products
+            reward_product_qty = min(reward_product_qty, self.order_line.filtered(lambda x: x.product_id == program.reward_product_id).product_uom_qty)
+            if program.rule_minimum_amount:
+                order_total = sum(order_lines.mapped('price_total')) - (program.reward_product_quantity * program.reward_product_id.lst_price)
+                reward_product_qty = min(reward_product_qty, order_total // program.rule_minimum_amount)
         else:
             reward_product_qty = min(max_product_qty, self.order_line.filtered(lambda x: x.product_id == program.reward_product_id).product_uom_qty)
 
@@ -242,15 +246,15 @@ class SaleOrder(models.Model):
         return coupon
 
     def _send_reward_coupon_mail(self):
-        self.ensure_one()
         template = self.env.ref('sale_coupon.mail_template_sale_coupon', raise_if_not_found=False)
         if template:
-            for coupon in self.generated_coupon_ids:
-                self.message_post_with_template(
-                    template.id, composition_mode='comment',
-                    model='sale.coupon', res_id=coupon.id,
-                    email_layout_xmlid='mail.mail_notification_light',
-                )
+            for order in self:
+                for coupon in order.generated_coupon_ids:
+                    order.message_post_with_template(
+                        template.id, composition_mode='comment',
+                        model='sale.coupon', res_id=coupon.id,
+                        email_layout_xmlid='mail.mail_notification_light',
+                    )
 
     def _get_applicable_programs(self):
         """
@@ -268,6 +272,7 @@ class SaleOrder(models.Model):
         self.ensure_one()
         programs = self.env['sale.coupon.program'].search([
             ('promo_code_usage', '=', 'no_code_needed'),
+            '|', ('company_id', '=', self.company_id.id), ('company_id', '=', False),
         ])._filter_programs_from_common_rules(self)
         return programs
 

@@ -84,6 +84,11 @@ class SaleCouponProgram(models.Model):
         if self.reward_product_id:
             self.reward_product_uom_id = self.reward_product_id.uom_id
 
+    @api.onchange('discount_type')
+    def _onchange_discount_type(self):
+        if self.discount_type == 'fixed_amount':
+            self.discount_apply_on = 'on_order'
+
     @api.model
     def create(self, vals):
         program = super(SaleCouponProgram, self).create(vals)
@@ -118,10 +123,10 @@ class SaleCouponProgram(models.Model):
 
     def toggle_active(self):
         super(SaleCouponProgram, self).toggle_active()
-        if not self.active:
-            coupons = self.filtered(lambda p: p.promo_code_usage == 'code_needed').mapped('coupon_ids')
-            coupons.filtered(lambda x: x.state != 'used').write({'state': 'expired'})
-        self.mapped('discount_line_product_id').write({'active': self.active})
+        for program in self:
+            program.discount_line_product_id.active = program.active
+        coupons = self.filtered(lambda p: not p.active and p.promo_code_usage == 'code_needed').mapped('coupon_ids')
+        coupons.filtered(lambda x: x.state != 'used').write({'state': 'expired'})
 
     def action_view_sales_orders(self):
         self.ensure_one()
@@ -191,18 +196,27 @@ class SaleCouponProgram(models.Model):
 
     @api.model
     def _filter_on_mimimum_amount(self, order):
-        untaxed_amount = order.amount_untaxed
-        tax_amount = order.amount_tax
+        filtered_programs = self.env['sale.coupon.program']
 
-        # Some lines should not be considered when checking if threshold is met like delivery
-        untaxed_amount -= sum([line.price_subtotal for line in order._get_no_effect_on_threshold_lines()])
-        tax_amount -= sum([line.price_tax for line in order._get_no_effect_on_threshold_lines()])
+        no_effect_lines = order._get_no_effect_on_threshold_lines()
+        order_amount = {
+            'amount_untaxed' : order.amount_untaxed - sum([line.price_subtotal for line in no_effect_lines]),
+            'amount_tax' : order.amount_tax - sum([line.price_tax for line in no_effect_lines])
+        }
+        for program in self:
+            lines = order.order_line.filtered(lambda line:
+                program.reward_type == 'discount' and
+                (line.product_id == program.discount_line_product_id or
+                line.product_id == program.reward_id.discount_line_product_id or
+                (program.program_type == 'promotion_program' and line.is_reward_line)
+            ))
+            untaxed_amount = order_amount['amount_untaxed'] - sum([line.price_subtotal for line in lines])
+            tax_amount = order_amount['amount_tax'] - sum([line.price_tax for line in lines])
+            program_amount = program._compute_program_amount('rule_minimum_amount', order.currency_id)
+            if program.rule_minimum_amount_tax_inclusion == 'tax_included' and program_amount <= (untaxed_amount + tax_amount) or program.rule_minimum_amount_tax_inclusion == 'tax_excluded' and program_amount <= untaxed_amount:
+                filtered_programs |= program
 
-        return self.filtered(lambda program:
-            program.rule_minimum_amount_tax_inclusion == 'tax_included' and
-            program._compute_program_amount('rule_minimum_amount', order.currency_id) <= untaxed_amount + tax_amount or
-            program.rule_minimum_amount_tax_inclusion == 'tax_excluded' and
-            program._compute_program_amount('rule_minimum_amount', order.currency_id) <= untaxed_amount)
+        return filtered_programs
 
     @api.model
     def _filter_on_validity_dates(self, order):
@@ -239,7 +253,7 @@ class SaleCouponProgram(models.Model):
             ordered_rule_products_qty = sum(products_qties[product] for product in valid_products)
             # Avoid program if 1 ordered foo on a program '1 foo, 1 free foo'
             if program.promo_applicability == 'on_current_order' and \
-               program._is_valid_product(program.reward_product_id) and program.reward_type == 'product':
+               program.reward_type == 'product' and program._get_valid_products(program.reward_product_id):
                 ordered_rule_products_qty -= program.reward_product_quantity
             if ordered_rule_products_qty >= program.rule_min_quantity:
                 valid_programs |= program
@@ -292,6 +306,7 @@ class SaleCouponProgram(models.Model):
 
     def _is_valid_product(self, product):
         # NOTE: if you override this method, think of also overriding _get_valid_products
+        # we also encourage the use of _get_valid_products as its execution is faster
         if self.rule_products_domain:
             domain = safe_eval(self.rule_products_domain) + [('id', '=', product.id)]
             return bool(self.env['product.product'].search_count(domain))
@@ -300,6 +315,6 @@ class SaleCouponProgram(models.Model):
 
     def _get_valid_products(self, products):
         if self.rule_products_domain:
-            domain = safe_eval(self.rule_products_domain) + [('id', 'in', products.ids)]
-            return self.env['product.product'].search(domain)
+            domain = safe_eval(self.rule_products_domain)
+            return products.filtered_domain(domain)
         return products
